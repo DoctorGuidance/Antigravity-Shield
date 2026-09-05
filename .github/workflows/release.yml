@@ -12,21 +12,10 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build-tauri-macos:
+  build-macos:
+    runs-on: macos-latest
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: "macos-latest"
-            args: "--target aarch64-apple-darwin"
-          - platform: "macos-latest"
-            args: "--target x86_64-apple-darwin"
-          - platform: "macos-latest"
-            args: "--target universal-apple-darwin --bundles app"
-
-    runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -58,66 +47,77 @@ jobs:
             if (!process.env.TAURI_SIGNING_PRIVATE_KEY || process.env.TAURI_SIGNING_PRIVATE_KEY.trim() === '') {
               if (c.bundle) c.bundle.createUpdaterArtifacts = false;
               fs.writeFileSync(p, JSON.stringify(c, null, 2), 'utf8');
-              console.log('No signing key: disabled bundle.createUpdaterArtifacts in tauri.conf.json');
+              console.log('No signing key: disabled createUpdaterArtifacts');
             } else {
               console.log('Updater signing key configured.');
             }
           }
           "
 
-      - name: Build the app
+      - name: Build aarch64 (Apple Silicon)
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          set -o pipefail
-          npm run tauri build -- ${{ matrix.args }} 2>&1 | tee tauri-build.log
+        run: npm run tauri build -- --target aarch64-apple-darwin 2>&1 | tee tauri-build-aarch64.log
 
-      - name: Upload build log on failure
+      - name: Build x86_64 (Intel)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --target x86_64-apple-darwin 2>&1 | tee tauri-build-x86_64.log
+
+      - name: Build Universal (.app)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --target universal-apple-darwin --bundles app 2>&1 | tee tauri-build-universal.log
+
+      - name: Upload build logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-macos-${{ strategy.job-index }}
-          path: tauri-build.log
+          name: build-logs-macos
+          path: tauri-build-*.log
 
       - name: Rename macOS assets for architecture
         run: |
-          if [[ "${{ matrix.args }}" == *"--target aarch64-apple-darwin"* ]]; then
-            ARCH="aarch64"
-          elif [[ "${{ matrix.args }}" == *"--target x86_64-apple-darwin"* ]]; then
-            ARCH="x64"
-          elif [[ "${{ matrix.args }}" == *"--target universal-apple-darwin"* ]]; then
-            ARCH="universal"
-          else
-            ARCH="unknown"
-          fi
+          rename_arch() {
+            local target_dir="$1"
+            local arch="$2"
+            if [ -d "$target_dir" ]; then
+              cd "$target_dir"
+              if [ -f "Antigravity Tools.app.tar.gz" ]; then
+                mv "Antigravity Tools.app.tar.gz" "Antigravity Tools_${arch}.app.tar.gz"
+                [ -f "Antigravity Tools.app.tar.gz.sig" ] && mv "Antigravity Tools.app.tar.gz.sig" "Antigravity Tools_${arch}.app.tar.gz.sig"
+                echo "Renamed $arch assets"
+              fi
+              cd - > /dev/null
+            fi
+          }
 
-          echo "Detected architecture: $ARCH"
-          cd src-tauri/target/*/release/bundle/macos/
-
-          if [ -f "Antigravity Tools.app.tar.gz" ]; then
-            mv "Antigravity Tools.app.tar.gz" "Antigravity Tools_${ARCH}.app.tar.gz"
-            mv "Antigravity Tools.app.tar.gz.sig" "Antigravity Tools_${ARCH}.app.tar.gz.sig"
-            echo "Renamed assets to append Arch: $ARCH"
-          fi
+          rename_arch "src-tauri/target/aarch64-apple-darwin/release/bundle/macos" "aarch64"
+          rename_arch "src-tauri/target/x86_64-apple-darwin/release/bundle/macos" "x64"
+          rename_arch "src-tauri/target/universal-apple-darwin/release/bundle/macos" "universal"
 
       - name: Upload updater json
         uses: actions/upload-artifact@v4
         with:
-          name: updater-json-macos-${{ strategy.job-index }}
+          name: updater-json-macos
           path: src-tauri/target/**/release/bundle/updater/*.json
           if-no-files-found: ignore
 
       - name: Upload Release Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-assets-macos-${{ strategy.job-index }}
+          name: release-assets-macos
           path: |
             src-tauri/target/**/release/bundle/dmg/*.dmg
+            src-tauri/target/**/release/bundle/dmg/*.sig
             src-tauri/target/**/release/bundle/macos/*.app.tar.gz
             src-tauri/target/**/release/bundle/macos/*.app.tar.gz.sig
-            src-tauri/target/**/release/bundle/dmg/*.sig
           if-no-files-found: warn
 
   build-ios:
@@ -163,7 +163,7 @@ jobs:
           if-no-files-found: warn
 
   publish-release:
-    needs: [build-tauri-macos, build-ios]
+    needs: [build-macos, build-ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write
